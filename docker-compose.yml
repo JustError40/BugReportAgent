@@ -1,0 +1,253 @@
+services:
+  # ─────────────────────────────────────────────
+  # 1. Qdrant – vector store
+  # ─────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: bugagent-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 2. RabbitMQ – message queue
+  # ─────────────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: bugagent-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # Management UI (guest/guest by default)
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-bugagent}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-bugagent}
+      RABBITMQ_DEFAULT_VHOST: /
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 3. Ollama – local LLM + embeddings (optional)
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: bugagent-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # GPU support: uncomment if nvidia-container-toolkit installed
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 4. Telegram MCP server (aiogram + FastMCP)
+  # ─────────────────────────────────────────────
+  telegram-mcp:
+    build:
+      context: ./telegram_mcp_server
+      dockerfile: Dockerfile
+    container_name: bugagent-telegram-mcp
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_IDS: ${TELEGRAM_CHAT_IDS:-}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 3000
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-bugagent}:${RABBITMQ_PASS:-bugagent}@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-bugagent}
+      TOPIC_STORE_PATH: /app/state/topics.json
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - telegram_state:/app/state
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 5. Taiga MCP server (pytaiga-mcp)
+  # ─────────────────────────────────────────────
+  taiga-mcp:
+    build:
+      context: ./pytaiga-mcp
+      dockerfile: Dockerfile
+    container_name: bugagent-taiga-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      TAIGA_URL: ${TAIGA_URL}
+      TAIGA_USERNAME: ${TAIGA_USERNAME}
+      TAIGA_PASSWORD: ${TAIGA_PASSWORD}
+      MCP_PORT: 8001
+      MCP_HOST: 0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # 6. BugAgent – main Python service
+  # ─────────────────────────────────────────────
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: bugagent-agent
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      telegram-mcp:
+        condition: service_healthy
+      taiga-mcp:
+        condition: service_healthy
+    environment:
+      # LLM provider: ollama | openai | openrouter | anthropic
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      VLLM_MODEL: ${VLLM_MODEL:-}
+      LLAMACPP_BASE_URL: ${LLAMACPP_BASE_URL:-http://llamacpp:8080/v1}
+      LLAMACPP_API_KEY: ${LLAMACPP_API_KEY:-}
+      LLAMACPP_MODEL: ${LLAMACPP_MODEL:-}
+      # Cloud LLM (used when LLM_PROVIDER != ollama)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLOUD_LLM_MODEL: ${CLOUD_LLM_MODEL:-}
+      # Qdrant
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-telegram_bugs}
+      # RabbitMQ
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-bugagent}:${RABBITMQ_PASS:-bugagent}@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-bugagent}
+      # MCP endpoints (for send_message, get_file_url, etc.)
+      TELEGRAM_MCP_URL: ${TELEGRAM_MCP_URL:-http://telegram-mcp:3000}
+      TAIGA_MCP_URL: ${TAIGA_MCP_URL:-http://taiga-mcp:8001}
+      # Bug detection
+      RERANK_SCORE_THRESHOLD: ${RERANK_SCORE_THRESHOLD:-0.65}
+      BUG_CLASSIFY_THRESHOLD: ${BUG_CLASSIFY_THRESHOLD:-0.75}
+      # Reranker runtime
+      RERANK_OPERATOR: ${RERANK_OPERATOR:-qdrant}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-http://qdrant:6333}
+      RERANK_MODEL: ${RERANK_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
+      # Taiga project
+      TAIGA_PROJECT_SLUG: ${TAIGA_PROJECT_SLUG}
+      # Generic task-tracker selector
+      TASK_TRACKER_PROVIDER: ${TASK_TRACKER_PROVIDER:-taiga}
+      TASK_TRACKER_PROJECT: ${TASK_TRACKER_PROJECT:-}
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./tags.md:/app/tags.md
+      - agent_state:/app/state
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ─────────────────────────────────────────────
+  # 7. LangGraph Studio dashboard (web)
+  # ─────────────────────────────────────────────
+  langgraph-dashboard:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: bugagent-langgraph-dashboard
+    restart: unless-stopped
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      telegram-mcp:
+        condition: service_healthy
+      taiga-mcp:
+        condition: service_healthy
+    ports:
+      - "8123:8123"
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2}
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY:-}
+      VLLM_MODEL: ${VLLM_MODEL:-}
+      LLAMACPP_BASE_URL: ${LLAMACPP_BASE_URL:-http://llamacpp:8080/v1}
+      LLAMACPP_API_KEY: ${LLAMACPP_API_KEY:-}
+      LLAMACPP_MODEL: ${LLAMACPP_MODEL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLOUD_LLM_MODEL: ${CLOUD_LLM_MODEL:-}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-telegram_bugs}
+      RABBITMQ_URL: amqp://${RABBITMQ_USER:-bugagent}:${RABBITMQ_PASS:-bugagent}@rabbitmq:5672/
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE:-bugagent}
+      TELEGRAM_MCP_URL: ${TELEGRAM_MCP_URL:-http://telegram-mcp:3000}
+      TAIGA_MCP_URL: ${TAIGA_MCP_URL:-http://taiga-mcp:8001}
+      RERANK_SCORE_THRESHOLD: ${RERANK_SCORE_THRESHOLD:-0.65}
+      BUG_CLASSIFY_THRESHOLD: ${BUG_CLASSIFY_THRESHOLD:-0.75}
+      RERANK_OPERATOR: ${RERANK_OPERATOR:-qdrant}
+      RERANK_BASE_URL: ${RERANK_BASE_URL:-http://qdrant:6333}
+      RERANK_MODEL: ${RERANK_MODEL:-Xenova/ms-marco-MiniLM-L-6-v2}
+      TAIGA_PROJECT_SLUG: ${TAIGA_PROJECT_SLUG}
+      TASK_TRACKER_PROVIDER: ${TASK_TRACKER_PROVIDER:-taiga}
+      TASK_TRACKER_PROJECT: ${TASK_TRACKER_PROJECT:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./tags.md:/app/tags.md:ro
+    entrypoint: ["langgraph"]
+    command: ["dev", "--config", "/app/langgraph.json", "--host", "0.0.0.0", "--port", "8123", "--no-browser"]
+
+volumes:
+  qdrant_data:
+  rabbitmq_data:
+  ollama_data:
+  telegram_state:
+  agent_state:
+

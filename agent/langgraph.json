@@ -1,0 +1,10 @@
+{
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "bugagent": "./src/agent/graph.py:agent_graph",
+    "bugagent_studio": "./src/agent/studio.py:studio_graph"
+  },
+  "env": "../.env"
+}

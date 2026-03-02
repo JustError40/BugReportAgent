@@ -1,0 +1,79 @@
+# ═══════════════════════════════════════════════
+# BugAgent — static configuration
+# Mount as volume: ./config.yaml:/app/config.yaml:ro
+# ═══════════════════════════════════════════════
+
+agent:
+  name: "BugAgent"
+  mention: "@bug-agent"            # trigger phrase for manual mode
+  poll_interval_sec: 2             # long-polling timeout
+  max_concurrent_messages: 10      # asyncio semaphore
+
+# ── Message sources ───────────────────────────────────────────────────────────
+# Each entry must point to an MCP server implementing the Universal Messaging
+# Contract (tools: get_updates, send_message, get_file_url, list_chats).
+# Add a line here to attach a new messenger — the agent needs no code changes.
+sources:
+  - name: telegram
+    transport: rabbitmq                 # rabbitmq | mcp
+    mcp_url: http://telegram-mcp:3000      # used for send_message / get_file_url
+    queue_name: telegram.messages          # RabbitMQ queue the bot publishes to
+  # - name: discord
+  #   transport: rabbitmq
+  #   mcp_url: http://discord-mcp:3001
+  #   queue_name: discord.messages
+
+task_tracker:
+  provider: taiga                # taiga | <future providers>
+  project: ""                    # if empty, TASK_TRACKER_PROJECT / TAIGA_PROJECT_SLUG will be used
+  work_item_type: "user_story"   # issue | user_story
+  placement: "backlog"           # backlog | kanban
+  kanban_status: ""              # optional status name for kanban placement
+  backlog_status: ""             # optional status name for backlog placement
+  uniqueness_check_enabled: true
+  duplicate_title_similarity: 0.92
+  duplicate_scan_limit: 200
+  default_status: "New"
+  default_priority: "Normal"
+  default_type: "Bug"
+
+taiga:
+  project_slug: ""                 # overridden by TAIGA_PROJECT_SLUG env var
+  work_item_type: "user_story"     # issue | user_story
+  placement: "backlog"             # backlog | kanban
+  kanban_status: ""                # optional status name for kanban placement
+  backlog_status: ""               # optional status name for backlog placement
+  uniqueness_check_enabled: true    # skip creation when similar item already exists
+  duplicate_title_similarity: 0.92  # SequenceMatcher threshold for duplicate title
+  duplicate_scan_limit: 200         # how many existing items to scan in Taiga
+  default_status: "New"
+  default_priority: "Normal"
+  default_type: "Bug"
+  title_max_chars: 80
+  auto_assign: false               # set to true to assign to bot user
+
+qdrant:
+  collection: "telegram_bugs"      # overridden by QDRANT_COLLECTION env var
+  vector_size: 768                 # nomic-embed-text dim
+  distance: "Cosine"
+  on_disk_payload: true
+  positive_examples_limit: 5      # k-NN neighbours queried for rerank
+  hnsw_config:
+    m: 16
+    ef_construct: 100
+
+detection:
+  rerank_score_threshold: 0.65    # overridden by env var
+  bug_classify_threshold: 0.75    # overridden by env var
+  reranker_model: "Xenova/ms-marco-MiniLM-L-6-v2"
+
+deduplication:
+  state_file: "/app/state/seen_messages.json"
+  max_entries: 100000
+
+logging:
+  level: "INFO"                   # overridden by LOG_LEVEL env var
+  format: "json"                  # json | text
+  # Optional Prometheus metrics endpoint
+  metrics_enabled: false
+  metrics_port: 9090

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telegram-mcp-server"
+version = "0.1.0"
+description = "Minimal Telegram MCP server — aiogram bot + FastMCP SSE endpoint"
+requires-python = ">=3.12"
+
+dependencies = [
+    # Telegram
+    "aiogram>=3.13.0",
+    # MCP server
+    "mcp[cli]>=1.0.0",
+    # RabbitMQ
+    "aio-pika>=9.4.0",
+    # Config
+    "pydantic-settings>=2.4.0",
+    "python-dotenv>=1.0.0",
+    # HTTP server for SSE transport
+    "uvicorn>=0.30.0",
+    "starlette>=0.40.0",
+    # Logging
+    "structlog>=24.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
