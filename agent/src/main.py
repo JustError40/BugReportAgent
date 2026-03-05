@@ -20,11 +20,14 @@ config.yaml — no code changes needed.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import signal
+import time
 from dataclasses import asdict
 from typing import List
 
+import aio_pika
 import structlog
 
 from src.agent.graph import agent_graph
@@ -62,6 +65,108 @@ def _configure_logging() -> None:
 
 
 logger = structlog.get_logger(__name__)
+
+
+async def _publish_heartbeat_loop() -> None:
+    cfg = get_settings()
+    if not cfg.service_heartbeat_enabled:
+        return
+
+    connection = await aio_pika.connect_robust(cfg.rabbitmq_url)
+    try:
+        channel = await connection.channel()
+        exchange = await channel.declare_exchange(
+            cfg.rabbitmq_exchange,
+            aio_pika.ExchangeType.DIRECT,
+            durable=True,
+        )
+        queue = await channel.declare_queue(cfg.service_heartbeat_routing_key, durable=True)
+        await queue.bind(exchange, routing_key=cfg.service_heartbeat_routing_key)
+
+        logger.info(
+            "service_health.publisher_started",
+            service=cfg.service_name,
+            routing_key=cfg.service_heartbeat_routing_key,
+            interval_sec=cfg.service_heartbeat_interval_sec,
+        )
+
+        while True:
+            payload = {
+                "service": cfg.service_name,
+                "status": "ok",
+                "timestamp": int(time.time()),
+                "kind": "heartbeat",
+            }
+            await exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    content_type="application/json",
+                    delivery_mode=aio_pika.DeliveryMode.NOT_PERSISTENT,
+                ),
+                routing_key=cfg.service_heartbeat_routing_key,
+            )
+            await asyncio.sleep(max(5, cfg.service_heartbeat_interval_sec))
+    finally:
+        await connection.close()
+
+
+async def _monitor_service_health_loop() -> None:
+    cfg = get_settings()
+    if not cfg.service_health_enabled:
+        return
+
+    connection = await aio_pika.connect_robust(cfg.rabbitmq_url)
+    last_seen: dict[str, int] = {}
+    stale_warned: set[str] = set()
+    try:
+        channel = await connection.channel()
+        exchange = await channel.declare_exchange(
+            cfg.rabbitmq_exchange,
+            aio_pika.ExchangeType.DIRECT,
+            durable=True,
+        )
+        queue = await channel.declare_queue(cfg.service_health_queue, durable=True)
+        await queue.bind(exchange, routing_key=cfg.service_health_queue)
+
+        logger.info(
+            "service_health.monitor_started",
+            queue=cfg.service_health_queue,
+            stale_sec=cfg.service_health_stale_sec,
+        )
+
+        async def _on_msg(amqp_msg: aio_pika.IncomingMessage) -> None:
+            async with amqp_msg.process(ignore_processed=True):
+                try:
+                    payload = json.loads(amqp_msg.body.decode("utf-8"))
+                except Exception:
+                    logger.warning("service_health.bad_payload", body=amqp_msg.body[:200])
+                    return
+
+                service = str(payload.get("service") or "unknown")
+                ts = int(payload.get("timestamp") or time.time())
+                status = str(payload.get("status") or "unknown")
+
+                last_seen[service] = ts
+                stale_warned.discard(service)
+                logger.debug("service_health.heartbeat", service=service, status=status, timestamp=ts)
+
+        await queue.consume(_on_msg, no_ack=False)
+
+        while True:
+            await asyncio.sleep(max(5, cfg.service_health_check_interval_sec))
+            now = int(time.time())
+            for service, ts in list(last_seen.items()):
+                age = now - ts
+                if age > cfg.service_health_stale_sec and service not in stale_warned:
+                    logger.warning(
+                        "service_health.stale",
+                        service=service,
+                        age_sec=age,
+                        stale_threshold_sec=cfg.service_health_stale_sec,
+                    )
+                    stale_warned.add(service)
+    finally:
+        await connection.close()
 
 
 async def process_message(msg, source: BaseSource | None = None) -> None:
@@ -194,8 +299,13 @@ async def main() -> None:
         except Exception as exc:
             logger.error("source.fatal_error", source=source._source_name, error=str(exc))
 
-    # Run all sources concurrently
-    await asyncio.gather(*[_run_source(s) for s in sources], return_exceptions=True)
+    tasks = [
+        *[_run_source(s) for s in sources],
+        _monitor_service_health_loop(),
+        _publish_heartbeat_loop(),
+    ]
+    # Run all sources + health monitor concurrently
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == "__main__":

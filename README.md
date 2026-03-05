@@ -94,6 +94,18 @@ will create a task immediately, bypassing the score threshold.
       - To add a new tracker, implement one adapter in `agent/src/trackers/`
             (factory + adapter class), no graph rewrite required.
 
+## Service health checks via queue
+
+Container liveness for internal MCP services is organized as event heartbeats:
+
+- `telegram-mcp`, `taiga-mcp`, and `agent` publish heartbeat events to RabbitMQ
+      routing key `service.health`.
+- `agent` subscribes to `service.health` and logs stale services when heartbeat
+      is missing longer than `SERVICE_HEALTH_STALE_SEC`.
+
+This avoids aggressive HTTP health polling between containers and reduces
+startup-time probe storms.
+
 ## Tags
 
 Edit `tags.md` at any time. The agent reloads it on every LLM call — no

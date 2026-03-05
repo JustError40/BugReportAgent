@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     # ── RabbitMQ ──────────────────────────────────────────────────────
     rabbitmq_url: str = Field("amqp://bugagent:bugagent@rabbitmq:5672/", alias="RABBITMQ_URL")
     rabbitmq_exchange: str = Field("bugagent", alias="RABBITMQ_EXCHANGE")
+    service_name: str = Field("agent", alias="SERVICE_NAME")
+    service_heartbeat_enabled: bool = Field(True, alias="SERVICE_HEARTBEAT_ENABLED")
+    service_heartbeat_interval_sec: int = Field(30, alias="SERVICE_HEARTBEAT_INTERVAL_SEC")
+    service_heartbeat_routing_key: str = Field("service.health", alias="SERVICE_HEARTBEAT_ROUTING_KEY")
+    service_health_enabled: bool = Field(True, alias="SERVICE_HEALTH_ENABLED")
+    service_health_queue: str = Field("service.health", alias="SERVICE_HEALTH_QUEUE")
+    service_health_stale_sec: int = Field(90, alias="SERVICE_HEALTH_STALE_SEC")
+    service_health_check_interval_sec: int = Field(15, alias="SERVICE_HEALTH_CHECK_INTERVAL_SEC")
 
     # ── Taiga ─────────────────────────────────────────────────────────
     taiga_project_slug: str = Field("", alias="TAIGA_PROJECT_SLUG")

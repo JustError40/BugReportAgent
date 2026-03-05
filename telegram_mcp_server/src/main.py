@@ -30,6 +30,7 @@ from starlette.routing import Mount, Route
 
 from src.bot import create_bot, run_polling
 from src.config import get_settings
+from src.heartbeat import ServiceHeartbeatPublisher
 from src.server import mcp, send_message, get_file_url, list_chats, set_topic, stop_topic, list_topics
 
 
@@ -151,6 +152,17 @@ async def main() -> None:
     bot, dp, publisher = await create_bot()
     app = build_starlette_app()
 
+    heartbeat: ServiceHeartbeatPublisher | None = None
+    if cfg.service_heartbeat_enabled:
+        heartbeat = ServiceHeartbeatPublisher(
+            rabbitmq_url=cfg.rabbitmq_url,
+            exchange_name=cfg.rabbitmq_exchange,
+            routing_key=cfg.service_heartbeat_routing_key,
+            service_name=cfg.service_name,
+            interval_sec=cfg.service_heartbeat_interval_sec,
+        )
+        await heartbeat.start()
+
     config = uvicorn.Config(
         app=app,
         host=cfg.mcp_host,
@@ -165,6 +177,8 @@ async def main() -> None:
             tg.create_task(run_polling(bot, dp), name="bot-polling")
             tg.create_task(server.serve(), name="mcp-http")
     finally:
+        if heartbeat:
+            await heartbeat.stop()
         await publisher.close()
         log.info("telegram_mcp.shutdown")
 

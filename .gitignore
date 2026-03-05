@@ -21,6 +21,7 @@ state/
 # Environment / secrets
 .env.local
 .env.*
+!.env.example
 .envrc
 .secrets/
 *secrets*.env
